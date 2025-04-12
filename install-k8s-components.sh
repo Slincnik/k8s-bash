@@ -12,6 +12,14 @@ while [[ "$#" -gt 0 ]]; do
   shift
 done
 
+if [[ -n "$USER_CONFIG" ]]; then
+  if [[ ! -f "$USER_CONFIG" ]]; then
+    echo "Config file not found: $USER_CONFIG"
+    exit 1
+  fi
+  echo "Using user config file: $USER_CONFIG"
+fi
+
 
 
 echo "Install basic dependencies"

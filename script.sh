@@ -28,14 +28,10 @@ Usage:
 Options:
   --k8s-version <vX.Y>      Kubernetes minor version
                             Default: ${K8S_VERSION}
-
   --cni-version <vX.Y.Z>    CNI plugins version
                             Default: ${CNI_VERSION}
-
   --config <path>           Custom containerd config.toml
-
   --skip-cni                Skip installation of CNI plugin binaries
-
   -h, --help                Show this help
 EOF
 }
@@ -57,7 +53,6 @@ cleanup() {
 # -----------------------------------------------------------------------------
 # Preflight
 # -----------------------------------------------------------------------------
-
 if [[ "$EUID" -ne 0 ]]; then
   echo "Run this script as root or with sudo." >&2
   exit 1
@@ -71,7 +66,6 @@ fi
 # -----------------------------------------------------------------------------
 # Arguments
 # -----------------------------------------------------------------------------
-
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --k8s-version)
@@ -79,29 +73,24 @@ while [[ "$#" -gt 0 ]]; do
       K8S_VERSION="$2"
       shift 2
       ;;
-
     --cni-version)
       require_value "$1" "${2-}"
       CNI_VERSION="$2"
       shift 2
       ;;
-
     --config)
       require_value "$1" "${2-}"
       USER_CONFIG="$2"
       shift 2
       ;;
-
     --skip-cni)
       SKIP_CNI=true
       shift
       ;;
-
     -h|--help)
       usage
       exit 0
       ;;
-
     *)
       echo "Unknown option: $1" >&2
       echo
@@ -114,7 +103,6 @@ done
 # -----------------------------------------------------------------------------
 # Validate arguments
 # -----------------------------------------------------------------------------
-
 if [[ ! "$K8S_VERSION" =~ ^v[0-9]+\.[0-9]+$ ]]; then
   echo "Invalid Kubernetes version: ${K8S_VERSION}" >&2
   echo "Expected format: v1.37" >&2
@@ -135,22 +123,17 @@ fi
 # -----------------------------------------------------------------------------
 # Architecture
 # -----------------------------------------------------------------------------
-
 ARCH="$(dpkg --print-architecture)"
-
 case "$ARCH" in
   amd64)
     CNI_ARCH="amd64"
     ;;
-
   arm64)
     CNI_ARCH="arm64"
     ;;
-
   armhf)
     CNI_ARCH="arm"
     ;;
-
   *)
     echo "Unsupported architecture: ${ARCH}" >&2
     exit 1
@@ -160,9 +143,7 @@ esac
 # -----------------------------------------------------------------------------
 # Variables
 # -----------------------------------------------------------------------------
-
 K8S_URL="https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb"
-
 TMP_DIR="$(mktemp -d)"
 trap cleanup EXIT
 
@@ -170,93 +151,98 @@ echo "============================================================"
 echo " Kubernetes node bootstrap"
 echo "============================================================"
 echo "Kubernetes: ${K8S_VERSION}"
-echo "CNI:        ${CNI_VERSION}"
-echo "Arch:       ${ARCH}"
+echo "CNI: ${CNI_VERSION}"
+echo "Arch: ${ARCH}"
 echo
 
 # -----------------------------------------------------------------------------
 # Base dependencies
 # -----------------------------------------------------------------------------
-
 echo "==> Installing base dependencies"
-
 apt-get update
-
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   curl \
   gpg \
-  containerd
+  conntrack
+
+# -----------------------------------------------------------------------------
+# containerd (official Docker repository)
+# -----------------------------------------------------------------------------
+echo "==> Configuring containerd repository (official Docker repo)"
+
+install -d -m 0755 /etc/apt/keyrings
+
+curl \
+  -fsSL \
+  https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+UBUNTU_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+
+cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME} stable
+EOF
+
+apt-get update
+
+echo "==> Installing containerd"
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  containerd.io
 
 # -----------------------------------------------------------------------------
 # Kernel modules
 # -----------------------------------------------------------------------------
-
 echo "==> Configuring kernel modules"
-
 cat > /etc/modules-load.d/k8s.conf <<'EOF'
 overlay
 br_netfilter
 EOF
-
 modprobe overlay
 modprobe br_netfilter
 
 # -----------------------------------------------------------------------------
 # sysctl
 # -----------------------------------------------------------------------------
-
 echo "==> Configuring sysctl"
-
 cat > /etc/sysctl.d/99-kubernetes.conf <<'EOF'
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.ipv4.ip_forward = 1
 EOF
-
 sysctl --system >/dev/null
 
 # -----------------------------------------------------------------------------
 # Swap
 # -----------------------------------------------------------------------------
-
 echo "==> Disabling swap"
-
 swapoff -a
-
 if [[ ! -f /etc/fstab.k8s-bash.bak ]]; then
   cp -a /etc/fstab /etc/fstab.k8s-bash.bak
 fi
-
 sed -ri \
   '/[[:space:]]swap[[:space:]]/ s/^#?/#/' \
   /etc/fstab
 
 # -----------------------------------------------------------------------------
-# containerd
+# containerd configuration
 # -----------------------------------------------------------------------------
-
 echo "==> Configuring containerd"
-
 install -d -m 0755 /etc/containerd
 
 if [[ -n "$USER_CONFIG" ]]; then
   echo "Using custom containerd config: ${USER_CONFIG}"
-
   SOURCE_CONFIG="$(readlink -f "$USER_CONFIG")"
   TARGET_CONFIG="$(readlink -f "$CONTAINERD_CONFIG" 2>/dev/null || true)"
-
   if [[ "$SOURCE_CONFIG" != "$TARGET_CONFIG" ]]; then
     install -m 0644 \
       "$USER_CONFIG" \
       "$CONTAINERD_CONFIG"
   fi
-
 elif [[ ! -s "$CONTAINERD_CONFIG" ]]; then
   echo "Generating default containerd config"
-
   containerd config default > "$CONTAINERD_CONFIG"
-
 else
   echo "Existing containerd config found"
 fi
@@ -267,19 +253,15 @@ if grep -Eq \
   "$CONTAINERD_CONFIG"
 then
   echo "containerd CRI plugin is disabled." >&2
-
   if [[ -f /etc/kubernetes/kubelet.conf ]]; then
     echo "This node already appears to be part of a Kubernetes cluster." >&2
     echo "Refusing to replace containerd config automatically." >&2
     exit 1
   fi
-
   echo "Backing up old config and generating a clean one"
-
   cp -a \
     "$CONTAINERD_CONFIG" \
     "${CONTAINERD_CONFIG}.bak"
-
   containerd config default > "$CONTAINERD_CONFIG"
 fi
 
@@ -303,7 +285,6 @@ then
 fi
 
 echo "Validating containerd config"
-
 containerd config dump >/dev/null
 
 systemctl enable --now containerd
@@ -312,21 +293,16 @@ systemctl restart containerd
 # -----------------------------------------------------------------------------
 # CNI plugin binaries
 # -----------------------------------------------------------------------------
-
 if [[ "$SKIP_CNI" == false ]]; then
   echo "==> Installing CNI plugins"
-
   CNI_ARCHIVE="cni-plugins-linux-${CNI_ARCH}-${CNI_VERSION}.tgz"
-
   CNI_BASE_URL="https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}"
-
   CNI_VERSION_FILE="/opt/cni/bin/.k8s-bash-cni-version"
 
   if [[ -f "$CNI_VERSION_FILE" ]] \
     && [[ "$(cat "$CNI_VERSION_FILE")" == "${CNI_VERSION}/${CNI_ARCH}" ]]
   then
     echo "CNI plugins ${CNI_VERSION} (${CNI_ARCH}) already installed"
-
   else
     curl \
       -fL \
@@ -343,14 +319,12 @@ if [[ "$SKIP_CNI" == false ]]; then
       -o "${TMP_DIR}/${CNI_ARCHIVE}.sha256"
 
     echo "Verifying CNI checksum"
-
     (
       cd "$TMP_DIR"
       sha256sum -c "${CNI_ARCHIVE}.sha256"
     )
 
     install -d -m 0755 /opt/cni/bin
-
     tar \
       -xzf "${TMP_DIR}/${CNI_ARCHIVE}" \
       -C /opt/cni/bin
@@ -366,19 +340,15 @@ fi
 # -----------------------------------------------------------------------------
 # Kubernetes repository
 # -----------------------------------------------------------------------------
-
 echo "==> Configuring Kubernetes repository"
-
 install -d -m 0755 /etc/apt/keyrings
-
 curl \
   -fsSL \
   "${K8S_URL}/Release.key" \
   | gpg \
-      --dearmor \
-      --yes \
-      -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-
+    --dearmor \
+    --yes \
+    -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 chmod 0644 \
   /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
@@ -391,16 +361,13 @@ apt-get update
 # -----------------------------------------------------------------------------
 # Kubernetes components
 # -----------------------------------------------------------------------------
-
 echo "==> Installing Kubernetes components"
-
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   kubelet \
   kubeadm \
   kubectl
 
 echo "==> Holding Kubernetes packages"
-
 apt-mark hold \
   kubelet \
   kubeadm \
@@ -411,25 +378,20 @@ systemctl enable kubelet
 # -----------------------------------------------------------------------------
 # Verification
 # -----------------------------------------------------------------------------
-
 echo
 echo "============================================================"
 echo " Installation complete"
 echo "============================================================"
-
 printf 'containerd: '
 containerd --version
-
-printf 'kubectl:    '
+printf 'kubectl: '
 kubectl version \
   --client \
   --output=yaml \
   | awk '/gitVersion:/ { print $2; exit }'
-
-printf 'kubeadm:   '
+printf 'kubeadm: '
 kubeadm version -o short
-
-printf 'kubelet:   '
+printf 'kubelet: '
 kubelet --version
 
 echo
